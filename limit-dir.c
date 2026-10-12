@@ -17,6 +17,45 @@
 #define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
 #endif
 
+/* ---- 参数解析（可单测）---- */
+
+struct config {
+    const char *rw_dirs[64];
+    int         n_rw;
+    int         strict;
+    int         cmd_index;   /* 命令在 argv 中的起始下标，-1 表示无命令 */
+};
+
+enum parse_result { PARSE_OK = 0, PARSE_HELP, PARSE_ERR_OPT,
+                    PARSE_ERR_WARG, PARSE_ERR_WCOUNT, PARSE_ERR_NOCMD };
+
+static enum parse_result parse_args(int argc, char **argv, struct config *cfg) {
+    int i = 1;
+    cfg->n_rw = 0;
+    cfg->strict = 0;
+    cfg->cmd_index = -1;
+
+    while (i < argc) {
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help"))
+            return PARSE_HELP;
+        else if (!strcmp(argv[i], "-w")) {
+            if (i + 1 >= argc) return PARSE_ERR_WARG;
+            if (cfg->n_rw >= (int)(sizeof(cfg->rw_dirs) / sizeof(cfg->rw_dirs[0])))
+                return PARSE_ERR_WCOUNT;
+            cfg->rw_dirs[cfg->n_rw++] = argv[i + 1];
+            i += 2;
+        }
+        else if (!strcmp(argv[i], "--strict")) { cfg->strict = 1; i++; }
+        else if (!strcmp(argv[i], "--")) { i++; break; }
+        else if (argv[i][0] == '-' && argv[i][1] != '\0')
+            return PARSE_ERR_OPT;
+        else break;
+    }
+    if (i >= argc) return PARSE_ERR_NOCMD;
+    cfg->cmd_index = i;
+    return PARSE_OK;
+}
+
 /* 展开路径开头的 "~" 为 $HOME，返回静态缓冲区或原串 */
 static const char *expand_home(const char *path) {
     static char buf[4096];
@@ -96,9 +135,11 @@ static const char *const default_rw_dirs[] = {
     "~/.config",
     "~/.local",
     "~/.gnupg",
+    "~/.gnupg",
+    "~/.npm",
 };
 
-static void usage(int code) {
+static _Noreturn void usage(int code) {
     fprintf(code ? stderr : stdout,
         "limit-dir - 在受限文件系统下运行程序（基于 Landlock）\n"
         "\n"
@@ -109,7 +150,7 @@ static void usage(int code) {
         "  在当前目录及通过 -w 指定的目录内，COMMAND 拥有完全读写权限；\n"
         "  文件系统其余部分对 COMMAND 只读（包括其所有子进程）。\n"
         "  无需 root 权限，要求内核 >= 5.13。\n"
-        "默认额外可写: /tmp, ~/.cache, ~/.config, ~/.local, ~/.gnupg,\n"
+        "默认额外可写: /tmp, ~/.cache, ~/.config, ~/.local, ~/.gnupg, ~/.npm,\n"
         "              $XDG_RUNTIME_DIR（agent socket）\n"
         "  （--strict 可关闭这些默认放行，仅保留当前目录与 -w 目录）\n"
         "\n"
@@ -128,43 +169,24 @@ static void usage(int code) {
     exit(code);
 }
 
+#ifndef UNIT_TEST
 int main(int argc, char **argv) {
-    static const char *rw_dirs[64]; int n_rw = 0;
-    int strict = 0;
-    int i = 1;
+    struct config cfg;
 
-    // ---- 解析参数 ----
-    while (i < argc) {
-        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help"))
-            usage(0);
-        else if (!strcmp(argv[i], "-w")) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "limit-dir: -w 需要一个目录参数\n\n");
-                usage(1);
-            }
-            if (n_rw >= (int)(sizeof(rw_dirs) / sizeof(rw_dirs[0]))) {
-                fprintf(stderr, "limit-dir: -w 数量过多（最多 %d 个）\n",
-                        (int)(sizeof(rw_dirs) / sizeof(rw_dirs[0])));
-                return 1;
-            }
-            rw_dirs[n_rw++] = argv[i + 1];
-            i += 2;
-        }
-        else if (!strcmp(argv[i], "--strict")) {
-            strict = 1;
-            i++;
-        }
-        else if (!strcmp(argv[i], "--")) { i++; break; }
-        else if (argv[i][0] == '-' && argv[i][1] != '\0') {
-            fprintf(stderr, "limit-dir: 未知选项: %s\n\n", argv[i]);
-            usage(1);
-        }
-        else break;
+    switch (parse_args(argc, argv, &cfg)) {
+        case PARSE_OK:       break;
+        case PARSE_HELP:     usage(0);
+        case PARSE_ERR_OPT:  fprintf(stderr, "limit-dir: 未知选项: %s\n\n", argv[1]); usage(1);
+        case PARSE_ERR_WARG: fprintf(stderr, "limit-dir: -w 需要一个目录参数\n\n"); usage(1);
+        case PARSE_ERR_WCOUNT: fprintf(stderr, "limit-dir: -w 数量过多\n"); return 1;
+        case PARSE_ERR_NOCMD:
+        default:             fprintf(stderr, "limit-dir: 缺少要执行的命令\n\n"); usage(1);
     }
-    if (i >= argc) {
-        fprintf(stderr, "limit-dir: 缺少要执行的命令\n\n");
-        usage(1);
-    }
+
+    int i = cfg.cmd_index;
+    int strict = cfg.strict;
+    int n_rw   = cfg.n_rw;
+    const char **rw_dirs = cfg.rw_dirs;
 
     // ---- 探测内核 ABI 版本 ----
     int abi = ll_create(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
@@ -237,3 +259,4 @@ int main(int argc, char **argv) {
     perror("limit-dir: exec");
     return 127;
 }
+#endif
