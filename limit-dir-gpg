@@ -1,0 +1,8 @@
+#!/bin/sh
+# limit-dir-gpg: 在 ~/.gnupg 只读副本中运行命令（签名场景）
+set -e
+h=$(mktemp -d /tmp/gnupg-sandbox.XXXXXX)
+trap 'rm -rf "$h"' EXIT
+cp -a "$HOME/.gnupg/." "$h/"
+chmod 700 "$h"
+GNUPGHOME="$h" exec limit-dir "$@"
