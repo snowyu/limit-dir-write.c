@@ -56,7 +56,11 @@ static enum parse_result parse_args(int argc, char **argv, struct config *cfg) {
     return PARSE_OK;
 }
 
-/* 展开路径开头的 "~" 为 $HOME，返回静态缓冲区或原串 */
+/*
+ * 展开路径开头的 "~" 为 $HOME，返回静态缓冲区或原串。
+ * 注意：返回的是共享静态缓冲区，后续调用会覆盖——调用点必须
+ * 立即消费返回值（本文件中的循环均即取即用，不得先保存指针）。
+ */
 static const char *expand_home(const char *path) {
     static char buf[4096];
     if (path[0] != '~') return path;
@@ -126,7 +130,7 @@ static const struct rule_def extra_rules[] = {
 
 /*
  * 默认可写目录表（在 "/" 只读基准之上放行完全读写）。
- * 路径支持开头 "~" 展开为 $HOME。
+ * 路径支持开头 "~" 展开为 $HOME；表内不得有重复项（单元测试检查）。
  * --strict 时跳过本表（当前目录与 -w 指定目录仍可写）。
  */
 static const char *const default_rw_dirs[] = {
@@ -135,8 +139,8 @@ static const char *const default_rw_dirs[] = {
     "~/.config",
     "~/.local",
     "~/.gnupg",
-    "~/.gnupg",
     "~/.npm",
+    "~/.bun",
 };
 
 static _Noreturn void usage(int code) {
@@ -150,12 +154,12 @@ static _Noreturn void usage(int code) {
         "  在当前目录及通过 -w 指定的目录内，COMMAND 拥有完全读写权限；\n"
         "  文件系统其余部分对 COMMAND 只读（包括其所有子进程）。\n"
         "  无需 root 权限，要求内核 >= 5.13。\n"
-        "默认额外可写: /tmp, ~/.cache, ~/.config, ~/.local, ~/.gnupg, ~/.npm,\n"
-        "              $XDG_RUNTIME_DIR（agent socket）\n"
+        "默认额外可写: /tmp, ~/.cache, ~/.config, ~/.local, ~/.gnupg,\n"
+        "              ~/.npm, ~/.bun, $XDG_RUNTIME_DIR（agent socket）\n"
         "  （--strict 可关闭这些默认放行，仅保留当前目录与 -w 目录）\n"
         "\n"
         "参数:\n"
-        "  -w DIR        额外开放 DIR 为可写目录，可多次指定\n"
+        "  -w DIR        额外开放 DIR 为可写目录，可多次指定（支持 ~ 展开）\n"
         "  --strict      禁用默认可写目录，仅当前目录与 -w 目录可写\n"
         "  -h, --help    显示本帮助并退出\n"
         "  --            结束参数解析，其后的内容作为命令执行\n"
@@ -165,7 +169,7 @@ static _Noreturn void usage(int code) {
         "  limit-dir -w /tmp -w ~/.cache app # 额外开放 /tmp 和 ~/.cache\n"
         "  limit-dir -- bash -c 'echo hi'    # 命令以 - 开头时用 -- 分隔\n"
         "\n"
-        "版本: 1.1\n");
+        "版本: 1.2\n");
     exit(code);
 }
 
@@ -178,7 +182,7 @@ int main(int argc, char **argv) {
         case PARSE_HELP:     usage(0);
         case PARSE_ERR_OPT:  fprintf(stderr, "limit-dir: 未知选项: %s\n\n", argv[1]); usage(1);
         case PARSE_ERR_WARG: fprintf(stderr, "limit-dir: -w 需要一个目录参数\n\n"); usage(1);
-        case PARSE_ERR_WCOUNT: fprintf(stderr, "limit-dir: -w 数量过多\n"); return 1;
+        case PARSE_ERR_WCOUNT: fprintf(stderr, "limit-dir: -w 数量过多\n\n"); usage(1);
         case PARSE_ERR_NOCMD:
         default:             fprintf(stderr, "limit-dir: 缺少要执行的命令\n\n"); usage(1);
     }
@@ -245,11 +249,13 @@ int main(int argc, char **argv) {
     }
 
     // 3. 当前目录 + -w 指定的目录：放开全部权限
+    //（-w 路径同样支持 ~ 展开，与子 shell 对 ~ 的展开保持一致；
+    //  expand_home 的静态缓冲区在每次 add_rule 调用内即取即用）
     char cwd[4096];
     if (!getcwd(cwd, sizeof(cwd))) { perror("getcwd"); return 1; }
     if (add_rule(rs, cwd, handled, 0)) return 1;
     for (int k = 0; k < n_rw; k++)
-        if (add_rule(rs, rw_dirs[k], handled, 0)) return 1;
+        if (add_rule(rs, expand_home(rw_dirs[k]), handled, 0)) return 1;
 
     // ---- 生效并切换身份 ----
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) { perror("prctl"); return 1; }
